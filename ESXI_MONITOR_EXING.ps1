@@ -1,6 +1,6 @@
 # ==========================================================
 # ESXI_MONITOR_EXING
-# Version: 1.3.0
+# Version: 1.4.0
 # Estado: TEST
 #
 # Monitoreo y contingencia VMware ESXi mediante Datto RMM
@@ -39,6 +39,7 @@ $MonitorConfig = @{
     VMOrder_Variable         = 'ORDEN_VMS'
     ShutdownTimeout_Variable = 'TIMEOUT_VM'
     WaitBetweenVMs_Variable  = 'TIEMPO_ESPERA_VM'
+    HostShutdownDelay_Variable = 'TIEMPO_APAGADO_ESXI'
 
     # UPS / Datto
     UPS_IP_Variable          = 'IP_UPS'
@@ -58,6 +59,7 @@ $MonitorConfig = @{
     SSH_KeyPath_Test = "$env:TEMP\esxi_monitor_rsa"
     ShutdownTimeout_Test = 120
     WaitBetweenVMs_Test = 10
+    HostShutdownDelay_Test = 60
 
     UPS_Battery_Test = 20
     UPS_Runtime_Test = 20
@@ -179,19 +181,24 @@ function Get-ConfiguredVMOrder {
 function Get-ContingencySettings {
     $TimeoutRaw = Get-EnvironmentVariableValue $MonitorConfig.ShutdownTimeout_Variable
     $WaitRaw = Get-EnvironmentVariableValue $MonitorConfig.WaitBetweenVMs_Variable
+    $HostDelayRaw = Get-EnvironmentVariableValue $MonitorConfig.HostShutdownDelay_Variable
 
     $Timeout = $MonitorConfig.ShutdownTimeout_Test
     $Wait = $MonitorConfig.WaitBetweenVMs_Test
+    $HostDelay = $MonitorConfig.HostShutdownDelay_Test
 
     if (-not [string]::IsNullOrWhiteSpace($TimeoutRaw)) { $Timeout = [int]$TimeoutRaw }
     if (-not [string]::IsNullOrWhiteSpace($WaitRaw)) { $Wait = [int]$WaitRaw }
+    if (-not [string]::IsNullOrWhiteSpace($HostDelayRaw)) { $HostDelay = [int]$HostDelayRaw }
 
     if ($Timeout -lt 10) { throw 'TIMEOUT_VM debe ser >= 10 segundos.' }
     if ($Wait -lt 0) { throw 'TIEMPO_ESPERA_VM no puede ser negativo.' }
+    if ($HostDelay -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
 
     return [pscustomobject]@{
         TimeoutSeconds = $Timeout
         WaitSeconds = $Wait
+        HostShutdownDelaySeconds = $HostDelay
     }
 }
 
@@ -553,6 +560,42 @@ function Invoke-SSHVMShutdown {
     }
 }
 
+function Test-AllConfiguredVMsPoweredOff {
+    param([string]$Metodo)
+    $AllOff = $true
+    if ($Metodo -like 'PowerCLI*') {
+        try {
+            $VMsFinal = @(Get-VM -Server $script:ConexionESXi -ErrorAction Stop)
+            foreach ($NombreVM in $script:OrdenVMs) {
+                $VMFinal = @($VMsFinal | Where-Object { $_.Name -eq $NombreVM })[0]
+                if ($null -eq $VMFinal) { $script:ResultadosContingencia += "VERIFY | CRITICAL | $NombreVM | No encontrada."; $AllOff=$false; continue }
+                $EstadoFinal=$VMFinal.PowerState.ToString()
+                $script:ResultadosContingencia += "VERIFY | $NombreVM | $EstadoFinal"
+                if ($EstadoFinal -ne 'PoweredOff') { $AllOff=$false }
+            }
+        } catch { $script:ResultadosContingencia += "VERIFY | CRITICAL | Error consultando PowerCLI: $($_.Exception.Message)"; return $false }
+    } else {
+        if (-not (Test-SSH)) { $script:ResultadosContingencia += 'VERIFY | CRITICAL | No se pudo actualizar el inventario por SSH.'; return $false }
+        foreach ($NombreVM in $script:OrdenVMs) {
+            $VMFinal=@($script:VMs | Where-Object { $_.Name -eq $NombreVM })[0]
+            if ($null -eq $VMFinal) { $script:ResultadosContingencia += "VERIFY | CRITICAL | $NombreVM | No encontrada."; $AllOff=$false; continue }
+            $script:ResultadosContingencia += "VERIFY | $NombreVM | $($VMFinal.PowerState)"
+            if ($VMFinal.PowerState -ne 'PoweredOff') { $AllOff=$false }
+        }
+    }
+    return $AllOff
+}
+
+function Invoke-ESXiHostShutdown {
+    param([int]$DelaySeconds)
+    if ($DelaySeconds -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
+    Write-ContingencyTrace 'HOST' "Programando apagado del ESXi en $DelaySeconds segundos."
+    $Command="esxcli system shutdown poweroff -d $DelaySeconds -r 'UPS EXING - contingencia automatica'"
+    $null=Invoke-ESXiSSHCommand $Command
+    $script:ResultadosContingencia += "HOST | ESXi | Apagado programado en $DelaySeconds segundos."
+    return $true
+}
+
 function Invoke-Contingencia {
     param([string]$Metodo)
 
@@ -640,6 +683,7 @@ $ConexionCreadaPorMonitor = $false
 $OrdenVMs = @()
 $TimeoutVM = 120
 $EsperaEntreVMs = 10
+$TiempoApagadoESXi = 60
 
 $CLIUser = Get-EnvironmentVariableValue $MonitorConfig.CLI_User_Variable
 $CLIPassword = Get-EnvironmentVariableValue $MonitorConfig.CLI_Password_Variable
@@ -664,6 +708,7 @@ try {
     $ContingencySettings = Get-ContingencySettings
     $TimeoutVM = $ContingencySettings.TimeoutSeconds
     $EsperaEntreVMs = $ContingencySettings.WaitSeconds
+    $TiempoApagadoESXi = $ContingencySettings.HostShutdownDelaySeconds
     $UPSSettings = Get-UPSSettings
 
     if ([string]::IsNullOrWhiteSpace($MonitorConfig.Name)) { throw 'Falta el nombre del monitor ESXi.' }
@@ -673,7 +718,7 @@ try {
 catch {
     $EstadoDatto = "ESXi EXING - CRITICAL - Configuracion incorrecta - $($MonitorConfig.Name)"
     Write-DRRMAlert $EstadoDatto
-    Write-DRRMDiagnostic "ESXI MONITOR EXING`n==========================================`nVersion: 1.3.0`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
+    Write-DRRMDiagnostic "ESXI MONITOR EXING`n==========================================`nVersion: 1.4.0`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
     exit 1
 }
 
@@ -771,59 +816,27 @@ else {
 }
 
 # ==========================================================
-# VERIFICACION FINAL DE VMs
+# VERIFICACION FINAL DE VMs Y APAGADO DEL HOST
 # ==========================================================
 
+$TodasLasVMsApagadas = $false
+
 if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequired -and ($CLI_OK -or $SSH_OK)) {
-    try {
-        Write-ContingencyTrace 'VERIFICACION' '=========================================='
-        Write-ContingencyTrace 'VERIFICACION' 'Iniciando verificacion final de todas las VMs'
-
-        if ($MetodoUtilizado -like 'PowerCLI*') {
-            $VMsFinal = @(Get-VM -Server $script:ConexionESXi -ErrorAction Stop)
-            foreach ($NombreVM in $OrdenVMs) {
-                $VMFinal = @($VMsFinal | Where-Object { $_.Name -eq $NombreVM })[0]
-                if ($null -eq $VMFinal) {
-                    Write-ContingencyTrace 'VERIFY' "VM=$NombreVM | No encontrada"
-                    $ResultadosContingencia += "VERIFY | $NombreVM | No encontrada."
-                    $CodigoSalida = 1
-                }
-                else {
-                    $EstadoFinal = $VMFinal.PowerState.ToString()
-                    Write-ContingencyTrace 'VERIFY' "VM=$NombreVM | Estado final=$EstadoFinal"
-                    $ResultadosContingencia += "VERIFY | $NombreVM | $EstadoFinal"
-                    if ($EstadoFinal -ne 'PoweredOff') { $CodigoSalida = 1 }
-                }
-            }
-        }
-        else {
-            $null = Test-SSH
-            foreach ($NombreVM in $OrdenVMs) {
-                $VMFinal = @($VMs | Where-Object { $_.Name -eq $NombreVM })[0]
-                if ($null -eq $VMFinal) {
-                    Write-ContingencyTrace 'VERIFY' "VM=$NombreVM | No encontrada"
-                    $ResultadosContingencia += "VERIFY | $NombreVM | No encontrada."
-                    $CodigoSalida = 1
-                }
-                else {
-                    Write-ContingencyTrace 'VERIFY' "VM=$NombreVM | Estado final=$($VMFinal.PowerState)"
-                    $ResultadosContingencia += "VERIFY | $NombreVM | $($VMFinal.PowerState)"
-                    if ($VMFinal.PowerState -ne 'PoweredOff') { $CodigoSalida = 1 }
-                }
-            }
-        }
-
-        Write-ContingencyTrace 'VERIFICACION' "Fin de verificacion | CodigoSalida=$CodigoSalida"
-
-        if ($CodigoSalida -ne 0) {
-            $EstadoDatto = "ESXi EXING - CRITICAL - Contingencia no verificada completamente - $($MonitorConfig.Name)"
-        }
+    $TodasLasVMsApagadas = Test-AllConfiguredVMsPoweredOff -Metodo $MetodoUtilizado
+    if (-not $TodasLasVMsApagadas) {
+        $CodigoSalida=1
+        $EstadoDatto="ESXi EXING - CRITICAL - Contingencia no verificada completamente - $($MonitorConfig.Name)"
     }
-    catch {
-        Write-ContingencyTrace 'ERROR' "Verificacion final fallo: $($_.Exception.Message)"
-        $ResultadosContingencia += "VERIFY | CRITICAL | Error en verificacion final: $($_.Exception.Message)"
-        $CodigoSalida = 1
-        $EstadoDatto = "ESXi EXING - CRITICAL - Error verificando contingencia - $($MonitorConfig.Name)"
+    elseif ($ContingenciaFallos -eq 0) {
+        try {
+            $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi
+            $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
+            $CodigoSalida=0
+        } catch {
+            $ResultadosContingencia += "HOST | CRITICAL | No se pudo programar el apagado del ESXi: $($_.Exception.Message)"
+            $EstadoDatto="ESXi EXING - CRITICAL - VMs apagadas pero no se pudo programar el apagado del ESXi - $($MonitorConfig.Name)"
+            $CodigoSalida=1
+        }
     }
 }
 
@@ -914,6 +927,7 @@ $($OrdenVMs -join "`n")
 
 Timeout por VM: $TimeoutVM segundos
 Espera entre VMs: $EsperaEntreVMs segundos
+Tiempo apagado ESXi: $TiempoApagadoESXi segundos
 
 ------------------------------------------
 CONTINGENCIA:
@@ -921,6 +935,8 @@ $($ResultadosContingencia -join "`n")
 
 Las VMs se informan normalmente como INFO.
 Durante MODO_CONTINGENCIA, un fallo de apagado/verificacion genera CRITICAL.
+El host ESXi solo se programa para apagarse despues de verificar que TODAS las VMs configuradas estan PoweredOff.
+Ejecucion de Monitor debe permanecer ultima en ORDEN_VMS.
 Un error SNMP nunca dispara un apagado automatico.
 
 Estado Datto: $EstadoDatto
