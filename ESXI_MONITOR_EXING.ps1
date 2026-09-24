@@ -1,6 +1,6 @@
 # ==========================================================
 # ESXI_MONITOR_EXING
-# Version: 1.4.0
+# Version: 1.4.1
 # Estado: TEST
 #
 # Monitoreo y contingencia VMware ESXi mediante Datto RMM
@@ -40,6 +40,7 @@ $MonitorConfig = @{
     ShutdownTimeout_Variable = 'TIMEOUT_VM'
     WaitBetweenVMs_Variable  = 'TIEMPO_ESPERA_VM'
     HostShutdownDelay_Variable = 'TIEMPO_APAGADO_ESXI'
+    HostShutdownEnabled_Variable = 'APAGAR_ESXI'
 
     # UPS / Datto
     UPS_IP_Variable          = 'IP_UPS'
@@ -182,6 +183,7 @@ function Get-ContingencySettings {
     $TimeoutRaw = Get-EnvironmentVariableValue $MonitorConfig.ShutdownTimeout_Variable
     $WaitRaw = Get-EnvironmentVariableValue $MonitorConfig.WaitBetweenVMs_Variable
     $HostDelayRaw = Get-EnvironmentVariableValue $MonitorConfig.HostShutdownDelay_Variable
+    $HostShutdownRaw = Get-EnvironmentVariableValue $MonitorConfig.HostShutdownEnabled_Variable
 
     $Timeout = $MonitorConfig.ShutdownTimeout_Test
     $Wait = $MonitorConfig.WaitBetweenVMs_Test
@@ -195,10 +197,13 @@ function Get-ContingencySettings {
     if ($Wait -lt 0) { throw 'TIEMPO_ESPERA_VM no puede ser negativo.' }
     if ($HostDelay -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
 
+    $HostShutdownEnabled = Convert-ToBoolean $HostShutdownRaw $true
+
     return [pscustomobject]@{
         TimeoutSeconds = $Timeout
         WaitSeconds = $Wait
         HostShutdownDelaySeconds = $HostDelay
+        HostShutdownEnabled = $HostShutdownEnabled
     }
 }
 
@@ -684,6 +689,7 @@ $OrdenVMs = @()
 $TimeoutVM = 120
 $EsperaEntreVMs = 10
 $TiempoApagadoESXi = 60
+$ApagarESXi = $true
 
 $CLIUser = Get-EnvironmentVariableValue $MonitorConfig.CLI_User_Variable
 $CLIPassword = Get-EnvironmentVariableValue $MonitorConfig.CLI_Password_Variable
@@ -709,6 +715,7 @@ try {
     $TimeoutVM = $ContingencySettings.TimeoutSeconds
     $EsperaEntreVMs = $ContingencySettings.WaitSeconds
     $TiempoApagadoESXi = $ContingencySettings.HostShutdownDelaySeconds
+    $ApagarESXi = $ContingencySettings.HostShutdownEnabled
     $UPSSettings = Get-UPSSettings
 
     if ([string]::IsNullOrWhiteSpace($MonitorConfig.Name)) { throw 'Falta el nombre del monitor ESXi.' }
@@ -828,14 +835,21 @@ if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequire
         $EstadoDatto="ESXi EXING - CRITICAL - Contingencia no verificada completamente - $($MonitorConfig.Name)"
     }
     elseif ($ContingenciaFallos -eq 0) {
-        try {
-            $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi
-            $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
+        if (-not $ApagarESXi) {
+            $ResultadosContingencia += 'HOST | INFO | Apagado del ESXi deshabilitado por APAGAR_ESXI=False. Las VMs fueron apagadas y verificadas.'
+            $EstadoDatto="ESXi EXING - OK - Contingencia VMs completada - Apagado ESXi deshabilitado"
             $CodigoSalida=0
-        } catch {
-            $ResultadosContingencia += "HOST | CRITICAL | No se pudo programar el apagado del ESXi: $($_.Exception.Message)"
-            $EstadoDatto="ESXi EXING - CRITICAL - VMs apagadas pero no se pudo programar el apagado del ESXi - $($MonitorConfig.Name)"
-            $CodigoSalida=1
+        }
+        else {
+            try {
+                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi
+                $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
+                $CodigoSalida=0
+            } catch {
+                $ResultadosContingencia += "HOST | CRITICAL | No se pudo programar el apagado del ESXi: $($_.Exception.Message)"
+                $EstadoDatto="ESXi EXING - CRITICAL - VMs apagadas pero no se pudo programar el apagado del ESXi - $($MonitorConfig.Name)"
+                $CodigoSalida=1
+            }
         }
     }
 }
@@ -869,7 +883,7 @@ Write-DRRMAlert $EstadoDatto
 Write-DRRMDiagnostic @"
 ESXI MONITOR EXING
 ==========================================
-Version: 1.3.0
+Version: 1.4.1
 
 ESXi: $($MonitorConfig.Name)
 Host: $($MonitorConfig.Host)
@@ -928,6 +942,7 @@ $($OrdenVMs -join "`n")
 Timeout por VM: $TimeoutVM segundos
 Espera entre VMs: $EsperaEntreVMs segundos
 Tiempo apagado ESXi: $TiempoApagadoESXi segundos
+Apagado ESXi habilitado: $ApagarESXi
 
 ------------------------------------------
 CONTINGENCIA:
