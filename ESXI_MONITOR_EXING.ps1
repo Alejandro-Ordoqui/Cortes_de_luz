@@ -1,6 +1,6 @@
 # ==========================================================
 # ESXI_MONITOR_EXING
-# Version: 1.4.1
+# Version: 1.5.0
 # Estado: TEST
 #
 # Monitoreo y contingencia VMware ESXi mediante Datto RMM
@@ -26,8 +26,10 @@ $MonitorConfig = @{
     Name   = 'ESXI-01'
     Host   = '192.168.0.188'
 
-    Method = 'AUTO'
+    # CLI/PowerCLI es el metodo principal. SSH queda disponible solo como backup.
+    Method = 'CLI'
     Method_Variable = 'ESXI_MONITOR_METHOD'
+    SSH_BackupEnabled_Variable = 'ESXI_HABILITAR_SSH_BACKUP'
 
     CLI_User_Variable     = 'ESXI_CLI_USER'
     CLI_Password_Variable = 'ESXI_CLI_PASSWORD'
@@ -591,14 +593,59 @@ function Test-AllConfiguredVMsPoweredOff {
     return $AllOff
 }
 
-function Invoke-ESXiHostShutdown {
+function Invoke-PowerCLIHostShutdown {
     param([int]$DelaySeconds)
+
     if ($DelaySeconds -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
-    Write-ContingencyTrace 'HOST' "Programando apagado del ESXi en $DelaySeconds segundos."
-    $Command="esxcli system shutdown poweroff -d $DelaySeconds -r 'UPS EXING - contingencia automatica'"
-    $null=Invoke-ESXiSSHCommand $Command
-    $script:ResultadosContingencia += "HOST | ESXi | Apagado programado en $DelaySeconds segundos."
+
+    if ($null -eq $script:ConexionESXi) {
+        throw 'No existe una sesion PowerCLI valida para apagar el host ESXi.'
+    }
+
+    $VMHost = @(Get-VMHost -Server $script:ConexionESXi -ErrorAction Stop)[0]
+    if ($null -eq $VMHost) {
+        throw 'No se pudo obtener el host ESXi mediante PowerCLI.'
+    }
+
+    Write-ContingencyTrace 'HOST' "Programando apagado PowerCLI del ESXi en $DelaySeconds segundos."
+
+    # Stop-VMHost realiza el apagado ordenado del host.
+    # El delay se conserva para dejar margen antes del apagado.
+    if ($DelaySeconds -gt 0) {
+        Write-ContingencyTrace 'HOST' "Esperando $DelaySeconds segundos antes de solicitar el apagado del host."
+        Start-Sleep -Seconds $DelaySeconds
+    }
+
+    Stop-VMHost -VMHost $VMHost -Confirm:$false -ErrorAction Stop | Out-Null
+    $script:ResultadosContingencia += "HOST | ESXi | Apagado PowerCLI solicitado correctamente."
     return $true
+}
+
+function Invoke-ESXiHostShutdown {
+    param(
+        [int]$DelaySeconds,
+        [string]$Metodo
+    )
+
+    if ($Metodo -eq 'PowerCLI') {
+        return Invoke-PowerCLIHostShutdown -DelaySeconds $DelaySeconds
+    }
+
+    if ($Metodo -eq 'SSH' -or $Metodo -like 'SSH*') {
+        if (-not $script:SSHBackupEnabled) {
+            throw 'SSH esta deshabilitado. Habilite ESXI_HABILITAR_SSH_BACKUP=True para usarlo como backup.'
+        }
+
+        if ($DelaySeconds -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
+
+        Write-ContingencyTrace 'HOST' "Programando apagado SSH del ESXi en $DelaySeconds segundos."
+        $Command="esxcli system shutdown poweroff -d $DelaySeconds -r 'UPS EXING - contingencia automatica'"
+        $null=Invoke-ESXiSSHCommand $Command
+        $script:ResultadosContingencia += "HOST | ESXi | Apagado SSH programado en $DelaySeconds segundos."
+        return $true
+    }
+
+    throw "Metodo de apagado de host no soportado: $Metodo"
 }
 
 function Invoke-Contingencia {
@@ -690,6 +737,7 @@ $TimeoutVM = 120
 $EsperaEntreVMs = 10
 $TiempoApagadoESXi = 60
 $ApagarESXi = $true
+$SSHBackupEnabled = $false
 
 $CLIUser = Get-EnvironmentVariableValue $MonitorConfig.CLI_User_Variable
 $CLIPassword = Get-EnvironmentVariableValue $MonitorConfig.CLI_Password_Variable
@@ -700,6 +748,8 @@ $ModoContingencia = Convert-ToBoolean (Get-EnvironmentVariableValue 'MODO_CONTIN
 $MethodFromEnvironment = Get-EnvironmentVariableValue $MonitorConfig.Method_Variable
 if ([string]::IsNullOrWhiteSpace($MethodFromEnvironment)) { $MonitorMethod = ([string]$MonitorConfig.Method).ToUpperInvariant() }
 else { $MonitorMethod = $MethodFromEnvironment.ToUpperInvariant() }
+
+$SSHBackupEnabled = Convert-ToBoolean (Get-EnvironmentVariableValue $MonitorConfig.SSH_BackupEnabled_Variable) $false
 
 $UPSSettings = $null
 $UPSResult = $null
@@ -725,7 +775,7 @@ try {
 catch {
     $EstadoDatto = "ESXi EXING - CRITICAL - Configuracion incorrecta - $($MonitorConfig.Name)"
     Write-DRRMAlert $EstadoDatto
-    Write-DRRMDiagnostic "ESXI MONITOR EXING`n==========================================`nVersion: 1.4.0`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
+    Write-DRRMDiagnostic "ESXI MONITOR EXING`n==========================================`nVersion: 1.5.0`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
     exit 1
 }
 
@@ -742,8 +792,11 @@ $UPSResult = Test-UPS $UPSSettings
 $CLI_OK = $false
 $SSH_OK = $false
 
+# CLI/PowerCLI es el camino normal.
+# SSH solo se prueba como backup cuando ESXI_HABILITAR_SSH_BACKUP=True,
+# salvo que el administrador fuerce ESXI_MONITOR_METHOD=SSH.
 if ($MonitorMethod -eq 'CLI' -or $MonitorMethod -eq 'AUTO') { $CLI_OK = Test-PowerCLI }
-if ($MonitorMethod -eq 'SSH' -or ($MonitorMethod -eq 'AUTO' -and -not $CLI_OK)) { $SSH_OK = Test-SSH }
+if ($MonitorMethod -eq 'SSH' -or ($MonitorMethod -eq 'AUTO' -and -not $CLI_OK -and $SSHBackupEnabled)) { $SSH_OK = Test-SSH }
 
 if ($CLI_OK) {
     $MetodoUtilizado = 'PowerCLI'
@@ -784,16 +837,16 @@ elseif ($ModoContingencia -and ($CLI_OK -or $SSH_OK) -and $UPSResult.Contingency
     else {
         if ($CLI_OK) {
             $ContingenciaFallos = Invoke-Contingencia -Metodo 'PowerCLI'
-            if ($ContingenciaFallos -gt 0) {
-                $ResultadosContingencia += 'AUTO | PowerCLI no completo la contingencia. Se cambia a SSH/CLI.'
+            if ($ContingenciaFallos -gt 0 -and $SSHBackupEnabled) {
+                $ResultadosContingencia += 'AUTO | PowerCLI no completo la contingencia. Se intenta SSH como backup.'
                 $SSH_OK = Test-SSH
                 if ($SSH_OK) {
-                    $MetodoUtilizado = 'SSH (fallback AUTO)'
+                    $MetodoUtilizado = 'SSH (backup AUTO)'
                     $ContingenciaFallos = Invoke-Contingencia -Metodo 'SSH'
                 }
                 else {
                     $ContingenciaFallos = 1
-                    $ResultadosContingencia += "CRITICAL | AUTO | No se pudo refrescar inventario por SSH. $DetalleSSH"
+                    $ResultadosContingencia += "CRITICAL | AUTO | SSH backup no disponible. $DetalleSSH"
                 }
             }
         }
@@ -842,7 +895,7 @@ if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequire
         }
         else {
             try {
-                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi
+                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi -Metodo $MetodoUtilizado
                 $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
                 $CodigoSalida=0
             } catch {
@@ -883,12 +936,13 @@ Write-DRRMAlert $EstadoDatto
 Write-DRRMDiagnostic @"
 ESXI MONITOR EXING
 ==========================================
-Version: 1.4.1
+Version: 1.5.0
 
 ESXi: $($MonitorConfig.Name)
 Host: $($MonitorConfig.Host)
 Metodo configurado: $MonitorMethod
 Metodo utilizado: $MetodoUtilizado
+SSH backup habilitado: $SSHBackupEnabled
 MODO_CONTINGENCIA: $ModoContingencia
 
 Estado:
@@ -913,6 +967,8 @@ $DetalleCLI
 
 SSH:
 $DetalleSSH
+
+SSH backup habilitado: $SSHBackupEnabled
 
 ------------------------------------------
 Host:
@@ -951,6 +1007,7 @@ $($ResultadosContingencia -join "`n")
 Las VMs se informan normalmente como INFO.
 Durante MODO_CONTINGENCIA, un fallo de apagado/verificacion genera CRITICAL.
 El host ESXi solo se programa para apagarse despues de verificar que TODAS las VMs configuradas estan PoweredOff.
+CLI/PowerCLI es el metodo principal. SSH se mantiene como backup y se habilita con ESXI_HABILITAR_SSH_BACKUP=True.
 Ejecucion de Monitor debe permanecer ultima en ORDEN_VMS.
 Un error SNMP nunca dispara un apagado automatico.
 
