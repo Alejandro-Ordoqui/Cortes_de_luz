@@ -638,15 +638,39 @@ $CLI_OK = $false
 
 # PowerCLI es el unico camino de administracion de ESXi.
 if ($MonitorMethod -eq 'CLI') {
-        $ContingenciaFallos = Invoke-Contingencia -Metodo 'PowerCLI'
-    }
+    $CLI_OK = Test-PowerCLI
+}
+
+if ($CLI_OK) {
+    $MetodoUtilizado = 'PowerCLI'
+    $EstadoDatto = 'ESXi EXING - OK - Monitoreo funcionando - Metodo: PowerCLI'
+    $CodigoSalida = 0
+}
+else {
+    $EstadoDatto = "ESXi EXING - CRITICAL - Monitoreo fallido - $($MonitorConfig.Name)"
+    $CodigoSalida = 1
+}
+
+# ==========================================================
+# DECISION DE CONTINGENCIA
+# ==========================================================
+
+# Un error SNMP nunca dispara un apagado automatico.
+if (-not $UPSResult.Success) {
+    $ResultadosContingencia += 'CRITICAL | UPS | No se puede evaluar la condicion de contingencia por error SNMP.'
+    if ($CodigoSalida -eq 0) { $CodigoSalida = 1 }
+    $EstadoDatto = 'ESXi EXING - CRITICAL - UPS/SNMP no disponible'
+}
+elseif ($ModoContingencia -and $CLI_OK -and $UPSResult.ContingencyRequired) {
+    $ResultadosContingencia += "INFO | UPS | Contingencia autorizada. $($UPSResult.Reason)"
+    $ContingenciaFallos = Invoke-Contingencia -Metodo 'PowerCLI'
 
     if ($ContingenciaFallos -gt 0) {
         $EstadoDatto = "ESXi EXING - CRITICAL - Contingencia: fallaron $ContingenciaFallos apagados/verificaciones - $($MonitorConfig.Name)"
         $CodigoSalida = 1
     }
     else {
-        $EstadoDatto = "ESXi EXING - OK - Contingencia VMs completada - Metodo: $MetodoUtilizado"
+        $EstadoDatto = "ESXi EXING - OK - Contingencia VMs completada - Metodo: PowerCLI"
         $CodigoSalida = 0
     }
 }
@@ -666,8 +690,8 @@ else {
 
 $TodasLasVMsApagadas = $false
 
-if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequired -and ($CLI_OK -or $SSH_OK)) {
-    $TodasLasVMsApagadas = Test-AllConfiguredVMsPoweredOff -Metodo $MetodoUtilizado
+if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequired -and $CLI_OK) {
+    $TodasLasVMsApagadas = Test-AllConfiguredVMsPoweredOff -Metodo PowerCLI
     if (-not $TodasLasVMsApagadas) {
         $CodigoSalida=1
         $EstadoDatto="ESXi EXING - CRITICAL - Contingencia no verificada completamente - $($MonitorConfig.Name)"
@@ -680,7 +704,7 @@ if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequire
         }
         else {
             try {
-                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi -Metodo $MetodoUtilizado
+                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi -Metodo PowerCLI
                 $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
                 $CodigoSalida=0
             } catch {
