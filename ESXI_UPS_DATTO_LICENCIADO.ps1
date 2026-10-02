@@ -1,6 +1,6 @@
 # ==========================================================
 # ESXI_UPS_DATTO
-# Version: 1.0.0
+# Version: 1.0.1
 # Estado: TEST DATTO RMM
 #
 # Monitoreo y contingencia VMware ESXi mediante Datto RMM
@@ -23,15 +23,13 @@ $ProgressPreference = 'SilentlyContinue'
 # ==========================================================
 
 $MonitorConfig = @{
-    Name   = 'ESXI-01'
-    Host   = '192.168.0.188'
+    Host_Variable = 'ESXI_HOST'
+    CLI_User_Variable     = 'ESXI_CLI_USER'
+    CLI_Password_Variable = 'ESXI_CLI_PASSWORD'
 
     # PowerCLI es el unico metodo utilizado por Datto RMM.
     Method = 'CLI'
     Method_Variable = 'ESXI_MONITOR_METHOD'
-
-    CLI_User_Variable     = 'ESXI_CLI_USER'
-    CLI_Password_Variable = 'ESXI_CLI_PASSWORD'
 
     VMOrder_Variable         = 'ORDEN_VMS'
     ShutdownTimeout_Variable = 'TIMEOUT_VM'
@@ -52,7 +50,7 @@ $MonitorConfig = @{
 $OID_Bateria        = '.1.3.6.1.4.1.318.1.1.1.2.2.1.0'
 $OID_Autonomia      = '.1.3.6.1.4.1.318.1.1.1.2.2.3.0'
 $OID_VoltajeEntrada = '.1.3.6.1.4.1.318.1.1.1.3.2.1.0'
-$ComunidadSNMP = 'public'
+$SNMP_Community_Variable = 'SNMP_COMMUNITY'
 
 # ==========================================================
 # FUNCIONES GENERALES
@@ -109,7 +107,7 @@ function Write-ContingencyTrace {
     )
 
     # MOSTRAR_TRAZA=True habilita el detalle completo.
-    # Si no está definida, se respeta el valor predeterminado del monitor.
+    # Esta variable es opcional y, si no esta definida, la traza queda deshabilitada.
     $TraceRaw = Get-EnvironmentVariableValue 'MOSTRAR_TRAZA'
     $MostrarTraza = $false
 
@@ -228,7 +226,7 @@ function Get-SNMPValue {
     $SNMP = Get-Command snmpget -ErrorAction SilentlyContinue
     if ($null -eq $SNMP) { throw 'No se encontro snmpget en el equipo.' }
 
-    $Response = & $SNMP.Source -v 2c -c $ComunidadSNMP $UPSIP $OID 2>&1
+    $Response = & $SNMP.Source -v 2c -c $SNMPCommunity $UPSIP $OID 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SNMP fallo al consultar $Description en $UPSIP."
     }
@@ -243,6 +241,9 @@ function Get-SNMPValue {
 
 function Test-UPS {
     param($Settings)
+
+    $SNMPCommunity = Get-EnvironmentVariableValue $SNMP_Community_Variable
+    if ([string]::IsNullOrWhiteSpace($SNMPCommunity)) { throw 'Variable obligatoria SNMP_COMMUNITY no esta configurada.' }
 
     $Result = [pscustomobject]@{
         Success = $false
@@ -558,7 +559,7 @@ $VMs = @()
 $ResultadoVMs = @()
 $ResultadosContingencia = @()
 $CodigoSalida = 1
-$EstadoDatto = 'ESXi UPS DATTO - CRITICAL - Monitoreo fallido - ESXI-01'
+$EstadoDatto = 'ESXi UPS DATTO - CRITICAL - Monitoreo fallido'
 $MetodoUtilizado = '-'
 $DetalleCLI = 'No ejecutado'
 $HostName = '-'
@@ -589,7 +590,10 @@ $UPSResult = $null
 # ==========================================================
 
 try {
-    $ESXiHost = [string]$MonitorConfig.Host
+    $ESXiHost = Get-EnvironmentVariableValue $MonitorConfig.Host_Variable
+    if ([string]::IsNullOrWhiteSpace($ESXiHost)) {
+        throw 'Variable obligatoria ESXI_HOST no esta configurada.'
+    }
 
     $MethodFromEnvironment = Get-EnvironmentVariableValue $MonitorConfig.Method_Variable
     if ([string]::IsNullOrWhiteSpace($MethodFromEnvironment)) {
@@ -614,14 +618,12 @@ try {
     $ApagarESXi = $ContingencySettings.HostShutdownEnabled
     $UPSSettings = Get-UPSSettings
 
-    if ([string]::IsNullOrWhiteSpace($MonitorConfig.Name)) { throw 'Falta el nombre del monitor ESXi.' }
-    if ([string]::IsNullOrWhiteSpace($ESXiHost)) { throw 'Falta el host/IP del ESXi.' }
-    if ($MonitorMethod -ne 'CLI') { throw "Metodo invalido: '$MonitorMethod'. Valor permitido: CLI." }
+        if ($MonitorMethod -ne 'CLI') { throw "Metodo invalido: '$MonitorMethod'. Valor permitido: CLI." }
 }
 catch {
-    $EstadoDatto = "ESXi EXING - CRITICAL - Configuracion incorrecta - $($MonitorConfig.Name)"
+    $EstadoDatto = 'ESXi EXING - CRITICAL - Configuracion incorrecta'
     Write-DRRMAlert $EstadoDatto
-    Write-DRRMDiagnostic "ESXI UPS DATTO`n==========================================`nVersion: 1.0.0`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
+    Write-DRRMDiagnostic "ESXI UPS DATTO`n==========================================`nVersion: 1.0.1`n`nEstado: MONITOREO FALLIDO`n`nMotivo:`n$($_.Exception.Message)"
     exit 1
 }
 
@@ -648,7 +650,7 @@ if ($CLI_OK) {
     $CodigoSalida = 0
 }
 else {
-    $EstadoDatto = "ESXi EXING - CRITICAL - Monitoreo fallido - $($MonitorConfig.Name)"
+    $EstadoDatto = 'ESXi EXING - CRITICAL - Monitoreo fallido'
     $CodigoSalida = 1
 }
 
@@ -667,7 +669,7 @@ elseif ($ModoContingencia -and $CLI_OK -and $UPSResult.ContingencyRequired) {
     $ContingenciaFallos = Invoke-Contingencia -Metodo 'PowerCLI'
 
     if ($ContingenciaFallos -gt 0) {
-        $EstadoDatto = "ESXi EXING - CRITICAL - Contingencia: fallaron $ContingenciaFallos apagados/verificaciones - $($MonitorConfig.Name)"
+        $EstadoDatto = "ESXi EXING - CRITICAL - Contingencia: fallaron $ContingenciaFallos apagados/verificaciones"
         $CodigoSalida = 1
     }
     else {
@@ -695,7 +697,7 @@ if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequire
     $TodasLasVMsApagadas = Test-AllConfiguredVMsPoweredOff -Metodo PowerCLI
     if (-not $TodasLasVMsApagadas) {
         $CodigoSalida=1
-        $EstadoDatto="ESXi EXING - CRITICAL - Contingencia no verificada completamente - $($MonitorConfig.Name)"
+        $EstadoDatto='ESXi EXING - CRITICAL - Contingencia no verificada completamente'
     }
     elseif ($ContingenciaFallos -eq 0) {
         if (-not $ApagarESXi) {
@@ -705,12 +707,12 @@ if ($ModoContingencia -and $UPSResult.Success -and $UPSResult.ContingencyRequire
         }
         else {
             try {
-                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi -Metodo PowerCLI
+                $null=Invoke-ESXiHostShutdown -DelaySeconds $TiempoApagadoESXi
                 $EstadoDatto="ESXi EXING - OK - VMs apagadas. ESXi programado para apagarse en $TiempoApagadoESXi segundos."
                 $CodigoSalida=0
             } catch {
                 $ResultadosContingencia += "HOST | CRITICAL | No se pudo programar el apagado del ESXi: $($_.Exception.Message)"
-                $EstadoDatto="ESXi EXING - CRITICAL - VMs apagadas pero no se pudo programar el apagado del ESXi - $($MonitorConfig.Name)"
+                $EstadoDatto='ESXi EXING - CRITICAL - VMs apagadas pero no se pudo programar el apagado del ESXi'
                 $CodigoSalida=1
             }
         }
@@ -746,10 +748,9 @@ Write-DRRMAlert $EstadoDatto
 Write-DRRMDiagnostic @"
 ESXI MONITOR EXING
 ==========================================
-Version: 1.0.0
+Version: 1.0.1
 
-ESXi: $($MonitorConfig.Name)
-Host: $($MonitorConfig.Host)
+ESXi Host: $ESXiHost
 Metodo configurado: $MonitorMethod
 Metodo utilizado: $MetodoUtilizado
 MODO_CONTINGENCIA: $ModoContingencia
