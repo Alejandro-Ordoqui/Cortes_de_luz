@@ -1,8 +1,8 @@
 # ESXI_UPS_DATTO_LICENCIADO
 
-**Versión:** 1.0.0  
+**Versión:** 1.0.1  
 **Branch:** develop  
-**Commit de referencia:** c7c9653d8ead77cfc7e4e79d015e4f834493b261  
+**Commit de referencia:** 3d87b71cd060ab7782eb5e1a2509eb45e45e0585  
 **Script:** ESXI_UPS_DATTO_LICENCIADO.ps1
 
 ## Objetivo
@@ -17,10 +17,13 @@ Monitorear un ESXi licenciado mediante Datto RMM y PowerCLI, integrando una UPS 
 - Stop-VMHost para apagado ordenado del host.
 - Un error SNMP nunca dispara un apagado automático.
 
-## Variables
+## Variables de Datto RMM
+
+El componente utiliza variables de Datto RMM para que la política pueda duplicarse entre clientes sin modificar la lógica del script.
+
+### Variables visibles
+- ESXI_HOST
 - ESXI_MONITOR_METHOD
-- ESXI_CLI_USER
-- ESXI_CLI_PASSWORD
 - ORDEN_VMS
 - TIMEOUT_VM
 - TIEMPO_ESPERA_VM
@@ -32,6 +35,20 @@ Monitorear un ESXi licenciado mediante Datto RMM y PowerCLI, integrando una UPS 
 - UMBRAL_AUTONOMIA
 - UMBRAL_VOLTAJE_AC
 - MODO_CONTINGENCIA
+
+### Variables protegidas/ocultas
+- ESXI_CLI_USER
+- ESXI_CLI_PASSWORD
+- SNMP_COMMUNITY
+
+El script solo referencia los nombres de las variables. Los valores de cada cliente se cargan en Datto RMM. Las variables protegidas no se muestran en la salida de diagnóstico.
+
+### Modelo operativo
+1. Guardar el script como componente de monitor.
+2. Crear la política de Datto RMM y cargar sus variables.
+3. Para un nuevo cliente, duplicar la política.
+4. Modificar únicamente los valores de las variables del nuevo cliente.
+5. Si Datto requiere nombres diferentes para variables protegidas, adaptar únicamente sus referencias en el script.
 
 ## Secuencia
 1. Detectar la condición de UPS.
