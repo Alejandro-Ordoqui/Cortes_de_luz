@@ -226,6 +226,11 @@ function Get-SNMPValue {
     $SNMP = Get-Command snmpget -ErrorAction SilentlyContinue
     if ($null -eq $SNMP) { throw 'No se encontro snmpget en el equipo.' }
 
+    $SNMPCommunity = Get-EnvironmentVariableValue $SNMP_Community_Variable
+    if ([string]::IsNullOrWhiteSpace($SNMPCommunity)) {
+        throw 'Variable obligatoria SNMP_COMMUNITY no esta configurada.'
+    }
+
     $Response = & $SNMP.Source -v 2c -c $SNMPCommunity $UPSIP $OID 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SNMP fallo al consultar $Description en $UPSIP."
