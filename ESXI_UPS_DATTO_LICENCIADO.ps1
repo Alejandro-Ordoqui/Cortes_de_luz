@@ -46,30 +46,6 @@ $MonitorConfig = @{
     UPS_Runtime_Variable     = 'UMBRAL_AUTONOMIA'
     UPS_AC_Variable          = 'UMBRAL_VOLTAJE_AC'
 
-    # Fallback de laboratorio. En Datto se recomienda configurar las variables.
-    # Para la prueba inicial en Datto se recomienda definir ORDEN_VMS
-    # como variable del componente. Si no se define, se usa este orden de laboratorio.
-    VMOrder_Test = @(
-        'srv25'
-        'srv26'
-        'win10'
-        'Ejecucion de Monitor'
-    )
-
-    ShutdownTimeout_Test = 120
-    WaitBetweenVMs_Test = 10
-    HostShutdownDelay_Test = 60
-
-    UPS_Battery_Test = 20
-    UPS_Runtime_Test = 20
-    UPS_AC_Test = 10
-
-    # ======================================================
-    # TRAZA DE CONTINGENCIA
-    # ======================================================
-    # Por defecto se oculta el detalle TRACE. Para activarlo:
-    #   $env:MOSTRAR_TRAZA = 'True'
-    ContingencyTrace_Test = $false
 }
 
 # OIDs APC PowerNet utilizados por la contingencia.
@@ -99,15 +75,17 @@ function Get-EnvironmentVariableValue {
 }
 
 function Convert-ToBoolean {
-    param(
-        [string]$Value,
-        [bool]$Default = $false
-    )
+    param([string]$Value)
 
-    if ([string]::IsNullOrWhiteSpace($Value)) { return $Default }
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw 'Variable booleana obligatoria no configurada.'
+    }
 
-    try { return [System.Convert]::ToBoolean($Value) }
-    catch { throw "Valor booleano invalido: '$Value'. Use TRUE o FALSE." }
+    switch ($Value.Trim().ToUpperInvariant()) {
+        'TRUE'  { return $true }
+        'FALSE' { return $false }
+        default { throw "Valor booleano invalido: '$Value'. Use TRUE o FALSE." }
+    }
 }
 
 function Write-DRRMAlert {
@@ -133,14 +111,14 @@ function Write-ContingencyTrace {
     # MOSTRAR_TRAZA=True habilita el detalle completo.
     # Si no está definida, se respeta el valor predeterminado del monitor.
     $TraceRaw = Get-EnvironmentVariableValue 'MOSTRAR_TRAZA'
-    $MostrarTraza = $MonitorConfig.ContingencyTrace_Test
+    $MostrarTraza = $false
 
     if (-not [string]::IsNullOrWhiteSpace($TraceRaw)) {
         try {
-            $MostrarTraza = Convert-ToBoolean $TraceRaw $MonitorConfig.ContingencyTrace_Test
+            $MostrarTraza = Convert-ToBoolean $TraceRaw
         }
         catch {
-            $MostrarTraza = $MonitorConfig.ContingencyTrace_Test
+            $MostrarTraza = $false
         }
     }
 
@@ -153,15 +131,12 @@ function Write-ContingencyTrace {
 
 function Get-ConfiguredVMOrder {
     $RawOrder = Get-EnvironmentVariableValue $MonitorConfig.VMOrder_Variable
-
-    if (-not [string]::IsNullOrWhiteSpace($RawOrder)) {
-        $Order = @($RawOrder -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    }
-    else {
-        $Order = @($MonitorConfig.VMOrder_Test)
+    if ([string]::IsNullOrWhiteSpace($RawOrder)) {
+        throw 'Variable obligatoria ORDEN_VMS no esta configurada.'
     }
 
-    if ($Order.Count -eq 0) { throw 'No se definio ORDEN_VMS para la contingencia.' }
+    $Order = @($RawOrder -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($Order.Count -eq 0) { throw 'ORDEN_VMS esta vacia.' }
 
     return $Order
 }
@@ -172,19 +147,26 @@ function Get-ContingencySettings {
     $HostDelayRaw = Get-EnvironmentVariableValue $MonitorConfig.HostShutdownDelay_Variable
     $HostShutdownRaw = Get-EnvironmentVariableValue $MonitorConfig.HostShutdownEnabled_Variable
 
-    $Timeout = $MonitorConfig.ShutdownTimeout_Test
-    $Wait = $MonitorConfig.WaitBetweenVMs_Test
-    $HostDelay = $MonitorConfig.HostShutdownDelay_Test
+    foreach ($Item in @(
+        @{Name='TIMEOUT_VM';Value=$TimeoutRaw},
+        @{Name='TIEMPO_ESPERA_VM';Value=$WaitRaw},
+        @{Name='TIEMPO_APAGADO_ESXI';Value=$HostDelayRaw},
+        @{Name='APAGAR_ESXI';Value=$HostShutdownRaw}
+    )) {
+        if ([string]::IsNullOrWhiteSpace($Item.Value)) {
+            throw "Variable obligatoria $($Item.Name) no esta configurada."
+        }
+    }
 
-    if (-not [string]::IsNullOrWhiteSpace($TimeoutRaw)) { $Timeout = [int]$TimeoutRaw }
-    if (-not [string]::IsNullOrWhiteSpace($WaitRaw)) { $Wait = [int]$WaitRaw }
-    if (-not [string]::IsNullOrWhiteSpace($HostDelayRaw)) { $HostDelay = [int]$HostDelayRaw }
+    try { $Timeout = [int]$TimeoutRaw } catch { throw "TIMEOUT_VM invalido: '$TimeoutRaw'." }
+    try { $Wait = [int]$WaitRaw } catch { throw "TIEMPO_ESPERA_VM invalido: '$WaitRaw'." }
+    try { $HostDelay = [int]$HostDelayRaw } catch { throw "TIEMPO_APAGADO_ESXI invalido: '$HostDelayRaw'." }
 
     if ($Timeout -lt 10) { throw 'TIMEOUT_VM debe ser >= 10 segundos.' }
     if ($Wait -lt 0) { throw 'TIEMPO_ESPERA_VM no puede ser negativo.' }
     if ($HostDelay -lt 30) { throw 'TIEMPO_APAGADO_ESXI debe ser >= 30 segundos.' }
 
-    $HostShutdownEnabled = Convert-ToBoolean $HostShutdownRaw $true
+    $HostShutdownEnabled = Convert-ToBoolean $HostShutdownRaw
 
     return [pscustomobject]@{
         TimeoutSeconds = $Timeout
@@ -205,18 +187,23 @@ function Get-UPSSettings {
     $RuntimeRaw = Get-EnvironmentVariableValue $MonitorConfig.UPS_Runtime_Variable
     $ACRaw = Get-EnvironmentVariableValue $MonitorConfig.UPS_AC_Variable
 
-    $TestMode = Convert-ToBoolean $TestRaw $false
-    $BatteryThreshold = $MonitorConfig.UPS_Battery_Test
-    $RuntimeThreshold = $MonitorConfig.UPS_Runtime_Test
-    $ACThreshold = $MonitorConfig.UPS_AC_Test
-
-    if (-not [string]::IsNullOrWhiteSpace($BatteryRaw)) { $BatteryThreshold = [int]$BatteryRaw }
-    if (-not [string]::IsNullOrWhiteSpace($RuntimeRaw)) { $RuntimeThreshold = [int]$RuntimeRaw }
-    if (-not [string]::IsNullOrWhiteSpace($ACRaw)) { $ACThreshold = [int]$ACRaw }
-
-    if (-not $TestMode -and [string]::IsNullOrWhiteSpace($UPSIP)) {
-        throw 'IP_UPS no esta configurada.'
+    foreach ($Item in @(
+        @{Name='IP_UPS';Value=$UPSIP},
+        @{Name='MODO_PRUEBA';Value=$TestRaw},
+        @{Name='UMBRAL_BATERIA';Value=$BatteryRaw},
+        @{Name='UMBRAL_AUTONOMIA';Value=$RuntimeRaw},
+        @{Name='UMBRAL_VOLTAJE_AC';Value=$ACRaw}
+    )) {
+        if ([string]::IsNullOrWhiteSpace($Item.Value)) {
+            throw "Variable obligatoria $($Item.Name) no esta configurada."
+        }
     }
+
+    $TestMode = Convert-ToBoolean $TestRaw
+
+    try { $BatteryThreshold = [int]$BatteryRaw } catch { throw "UMBRAL_BATERIA invalido: '$BatteryRaw'." }
+    try { $RuntimeThreshold = [int]$RuntimeRaw } catch { throw "UMBRAL_AUTONOMIA invalido: '$RuntimeRaw'." }
+    try { $ACThreshold = [int]$ACRaw } catch { throw "UMBRAL_VOLTAJE_AC invalido: '$ACRaw'." }
 
     if ($BatteryThreshold -lt 0 -or $BatteryThreshold -gt 100) { throw 'UMBRAL_BATERIA debe estar entre 0 y 100.' }
     if ($RuntimeThreshold -lt 0) { throw 'UMBRAL_AUTONOMIA no puede ser negativo.' }
@@ -582,18 +569,16 @@ $MemoryUsage = '-'
 $ConexionESXi = $null
 $ConexionCreadaPorMonitor = $false
 $OrdenVMs = @()
-$TimeoutVM = 120
-$EsperaEntreVMs = 10
-$TiempoApagadoESXi = 60
-$ApagarESXi = $true
+$TimeoutVM = $null
+$EsperaEntreVMs = $null
+$TiempoApagadoESXi = $null
+$ApagarESXi = $null
 
 $CLIUser = Get-EnvironmentVariableValue $MonitorConfig.CLI_User_Variable
 $CLIPassword = Get-EnvironmentVariableValue $MonitorConfig.CLI_Password_Variable
 
-$ModoContingencia = Convert-ToBoolean (Get-EnvironmentVariableValue 'MODO_CONTINGENCIA') $false
-$MethodFromEnvironment = Get-EnvironmentVariableValue $MonitorConfig.Method_Variable
-if ([string]::IsNullOrWhiteSpace($MethodFromEnvironment)) { $MonitorMethod = ([string]$MonitorConfig.Method).ToUpperInvariant() }
-else { $MonitorMethod = $MethodFromEnvironment.ToUpperInvariant() }
+$ModoContingencia = $null
+$MonitorMethod = $null
 
 
 $UPSSettings = $null
@@ -605,6 +590,22 @@ $UPSResult = $null
 
 try {
     $ESXiHost = [string]$MonitorConfig.Host
+
+    $MethodFromEnvironment = Get-EnvironmentVariableValue $MonitorConfig.Method_Variable
+    if ([string]::IsNullOrWhiteSpace($MethodFromEnvironment)) {
+        throw 'Variable obligatoria ESXI_MONITOR_METHOD no esta configurada.'
+    }
+    $MonitorMethod = $MethodFromEnvironment.ToUpperInvariant()
+
+    $ModoContingenciaRaw = Get-EnvironmentVariableValue 'MODO_CONTINGENCIA'
+    if ([string]::IsNullOrWhiteSpace($ModoContingenciaRaw)) {
+        throw 'Variable obligatoria MODO_CONTINGENCIA no esta configurada.'
+    }
+    $ModoContingencia = Convert-ToBoolean $ModoContingenciaRaw
+
+    if ([string]::IsNullOrWhiteSpace($CLIUser)) { throw 'Variable obligatoria ESXI_CLI_USER no esta configurada.' }
+    if ([string]::IsNullOrWhiteSpace($CLIPassword)) { throw 'Variable obligatoria ESXI_CLI_PASSWORD no esta configurada.' }
+
     $OrdenVMs = @(Get-ConfiguredVMOrder)
     $ContingencySettings = Get-ContingencySettings
     $TimeoutVM = $ContingencySettings.TimeoutSeconds
